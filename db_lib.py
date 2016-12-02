@@ -26,10 +26,11 @@ analysis_ref = None
 
 services_config = {
     'amostra': {'host': 'localhost', 'port': '7770'},
-    'conftrak': {'host': 'localhost', 'port': '7771'}, 
+    'conftrak': {'host': 'localhost', 'port': '7771'},
     'metadataservice': {'host': 'localhost', 'port': '7772'},
     'analysisstore': {'host': 'localhost', 'port': '7773'}
 }
+
 
 def db_connect(params=services_config):
     """
@@ -409,24 +410,14 @@ def getPrimaryDewar():
     return getContainerByName(primaryDewarName)
 
 
-def getContainerByName(container_name): 
+def getContainerByName(container_name):
     c = getContainers(filters={'name': container_name})
     return c
+
 
 def getContainerByID(container_id):
     c = getContainers(filters={'uid': container_id})
     return c
-
-#stuff I forgot - alignment type?, what about some sort of s.sample lock?,
-
-
-def getQueueFast():
-    requests = Request.objects(sample_id__exists=True)
-
-#    return [request.to_mongo() for request in requests]
-    # generator seems slightly faster even when wrapped by list()
-    for request in requests:
-        yield request.to_mongo()
 
 
 def getQueue():
@@ -434,7 +425,7 @@ def getQueue():
     returns a list of request dicts for all the samples in the container
     named by the global variable 'primaryDewarName'
     """
-    
+
     # seems like this would be alot simpler if it weren't for the Nones?
 
     ret_list = []
@@ -444,46 +435,24 @@ def getQueue():
     # .first() returns None while [0] generates an IndexError
     # Nah... [0] is faster and catch Exception...
     try:
-        items = Container.objects(__raw__={'containerName': primaryDewarName}).only('item_list')[0].item_list
+        items = getPrimaryDewar()['content']
     except IndexError as AttributeError:
         raise ValueError('could not find container: "{0}"!'.format(primaryDewarName))
-    
+
     items = set(items)
     items.discard(None)  # skip empty positions
 
     sample_list = []
-    for samp in Container.objects(container_id__in=items).only('item_list'):
-        sil = set(samp.item_list)
+    contents = [getContainerByID(uid)['content'] for uid in items]
+    for samp in contents:
+        sil = set(samp)
         sil.discard(None)
         sample_list += sil
 
-    for request in Request.objects(sample_id__in=sample_list):
-        yield request.to_mongo()
-
-
-def getDewarPosfromSampleID(sample_id):
-
-    """
-    returns the container_id and position in that container for a sample with the given id
-    in one of the containers in the container named by the global variable 'primaryDewarName'
-    """
-    try:
-        cont = Container.objects(__raw__={'containerName': primaryDewarName}).only('item_list')[0]
-    except IndexError:
-        return None
-
-    for puck_id in cont.item_list:
-        if puck_id is not None:
-            try:
-                puck = Container.objects(__raw__={'container_id': puck_id}).only('item_list')[0]
-            except IndexError:
-                continue
-
-            for j,samp_id in enumerate(puck.item_list):
-                if samp_id == sample_id and samp_id is not None:
-                    containerID = puck_id
-                    position = j + 1  # most people don't zero index things
-                    return (containerID, position)    
+    for s in sample_list:
+        reqs = getRequestsBySampleID(s, active_only=True)
+        for request in reqs:
+            yield request
 
 
 def getCoordsfromSampleID(sample_id):
@@ -494,55 +463,29 @@ def getCoordsfromSampleID(sample_id):
     'primaryDewarName'
     """
     try:
-        primary_dewar_item_list = Container.objects(__raw__={'containerName': primaryDewarName}).only('item_list')[0].item_list
+        primary_dewar_item_list = getPrimaryDewar()['content']
     except IndexError as AttributeError:
-        return None
+        raise ValueError('could not find container: "{0}"!'.format(primaryDewarName))
+    try:
 
     # eliminate empty item_list slots
     pdil_set = set(primary_dewar_item_list)
     pdil_set.discard(None)
 
     # find container in the primary_dewar_item_list (pdil) which has the sample
-    c = Container.objects(container_id__in=pdil_set, item_list__all=[sample_id])[0]
+    filters = {'$and': {'uid': {'$in':pdil_set}, 'content': {'$in':[sample_id]}}}
+    c = getContainers(filters=filters)
 
     # get the index of the found container in the primary dewar
-    i = primary_dewar_item_list.index(c.container_id)
+    i = primary_dewar_item_list.index(c['uid'])
 
     # get the index of the sample in the found container item_list
-    j = c.item_list.index(sample_id)
+    j = c.['content'].index(sample_id)
 
     # get the container_id of the found container
-    puck_id = c.container_id
+    puck_id = c['uid']
 
     return (i, j, puck_id)
-
-# In [116]: %timeit dl.getCoordsfromSampleID(24006)
-# 100 loops, best of 3: 3.16 ms per loop
-# 
-# In [117]: %timeit dl.getOrderedRequestList()
-# 1 loops, best of 3: 1.06 s per loop
-# 
-# In [118]: dl.getCoordsfromSampleID(24006)
-# Out[118]: (17, 13, 11585)
-
-
-def getSampleIDfromCoords(puck_num, position):
-    """
-    given a container position within the dewar and position in
-    that container, returns the id for a sample in one of the
-    containers in the container named by the global variable
-    'primaryDewarName'
-    """
-    try:
-        cont = Container.objects(__raw__={'containerName': primaryDewarName}).only('item_list')[0]
-    except IndexError:
-        return None
-
-    puck_id = cont.item_list[puck_num]
-    puck = getContainerByID(puck_id)
-            
-    sample_id = puck["item_list"][position - 1]  # most people don't zero index things
-    return sample_id
 
 
 def popNextRequest():
@@ -565,17 +508,13 @@ def popNextRequest():
     return {}
 
 
-def getRequest(reqID, as_mongo_obj=False):  # need to get this from searching the dewar I guess
+def getRequest(reqID):  # need to get this from searching the dewar I guess
     reqID = int(reqID)
     """
     request_id:  required, integer id
     """
-    r = Request.objects(__raw__={'request_id': reqID})
-    return _try0_maybe_mongo(r, 'request', 'request_id', reqID, None,
-                             as_mongo_obj=as_mongo_obj)
-
-
-# this is really "update_sample" because the request is stored with the sample.
+    r = getRequestByID(reqID)
+    return r
 
 def updateRequest(request_dict):
     """
@@ -586,71 +525,49 @@ def updateRequest(request_dict):
     against that, making requests basically ephemerally useful objects.
     """
 
-    if not Request.objects(__raw__={'request_id': request_dict['request_id']}).update(
-        set__request_obj=request_dict['request_obj']):
-        
+    if 'uid' in request_dict:
+        r_uid = request_dict.pop('uid', '')
+        r = request_ref.update({'uid':r_uid},request_dict)
+
         addRequesttoSample(**request_dict)
 
 
 def deleteRequest(reqObj):
     """
-    reqObj should be a dictionary with a 'request_id' field
-    and optionally a 'sample_id' field.
+    reqObj should be a dictionary with a 'uid' field
+    and optionally a 'sample_uid' field.
 
-    If the request to be deleted is the last entry in a sample's
-    requestList, the list attribute is removed entirely, not just set
-    to an empty list!
-
-    The request_id attribute for any results which references the deleted request
-    are also entirely removed, not just set to None!
-
-    This seems to be the way either mongo, pymongo, or mongoengine works :(
     """
 
     r_id = reqObj['request_id']
 
-    # delete it from any sample first
-    try:
-        sample = getSampleByID(reqObj['sample_id'], as_mongo_obj=True)
-    
-        # maybe there's a slicker way to get the req with a query and remove it?
-        for req in sample.requestList:
-            if req.request_id == r_id:
-                print("found the request to delete")
-                sample.requestList.remove(req)
-                sample.save()
-                break
-
-    except KeyError:
-        pass  # not all requests are linked to samples
-
-    # then any results that refer to it
-    req = Request.objects(__raw__={'request_id': r_id}).only('id')[0].id
-    for res in Result.objects(request_id=req):
-        res.request_id = None
-        res.save()
-
-    # then finally directly in Requests
-    r = getRequest(r_id, as_mongo_obj=True)
-    if r:
-        r.delete()
+    r = getRequestByID(r_id)
+    r['active'] = False
+    updateRequest(r)
 
 
-def deleteSample(sampleObj):
-    s = getSampleByID(sampleObj["sample_id"], as_mongo_obj=True)
-    s.delete()
+def updateSample(sampleObj):
+    if 'uid' in sampleObj:
+        s_uid = sampleObj.pop('uid','')
+        s = sample_ref.update({'uid': s_uid}, sampleObj)
+
+
+def deleteSample(sample_uid):
+    s = getSampleByID(sample_uid])
+    s['active'] = False
+    updateSample(s)
 
 
 def removePuckFromDewar(dewarPos):
-    dewar = getPrimaryDewar(as_mongo_obj=True)
-    dewar.item_list[dewarPos] = None
-    dewar.save()
+    dewar = getPrimaryDewar()
+    dewar['content'][dewarPos] = None
+    updateContainer(dewar)
 
 
 def updatePriority(request_id, priority):
-    r = getRequest(request_id, as_mongo_obj=True)
-    r.priority = priority
-    r.save()
+    r = getRequest(request_id)
+    r['priority'] = priority
+    updateRequest(r)
 
 
 def getPriorityMap():
@@ -669,10 +586,9 @@ def getPriorityMap():
             priority_map[request['priority']] = [request]
 
     return priority_map
-    
+
 
 def getOrderedRequestList():
-#def getOrderedRequests():
     """
     returns a list of requests sorted by priority
     """
@@ -695,6 +611,22 @@ def getOrderedRequestList():
     return orderedRequestsList
 
 
+
+
+
+
+def createBeamline(bl_name, bl_num):
+    data = {"key": "beamline", "name": bl_name, "number": bl_num}
+    uid = configuration_ref.create(beamline_id=BEAMLINE_ID, **data)
+    return uid
+
+
+
+
+
+
+
+
 def beamlineInfo(beamline_id, info_name, info_dict=None):
     """
     to write info:  beamlineInfo('x25', 'det', info_dict={'vendor':'adsc','model':'q315r'})
@@ -703,14 +635,14 @@ def beamlineInfo(beamline_id, info_name, info_dict=None):
 
     # if it exists it's a query or update
     try:
-        bli = BeamlineInfo.objects(__raw__={'beamline_id': beamline_id,
-                                            'info_name': info_name})[0]
+        bli = list(configuration_ref.find(key='beamline_info', beamline_id=beamline_id, info_name=info_name))[0]
 
         if info_dict is None:  # this is a query
-            return bli.info
+            return bli['info']
 
         # else it's an update
-        bli.update(set__info=info_dict)
+        bli_uid = bli.pop('uid', '')
+        configuration_ref.update({'uid': bli_uid},{'info':info_dict})
 
     # else it's a create
     except IndexError:
@@ -720,72 +652,26 @@ def beamlineInfo(beamline_id, info_name, info_dict=None):
             return {}
 
         # normal create
-        BeamlineInfo(beamline_id=beamline_id, info_name=info_name, info=info_dict).save()
+        data = {'key': 'beamline_info', 'info_name':info_name, 'info': info_dict}
+        uid = configuration_ref.create(**data)
 
 
 def setBeamlineConfigParams(paramDict, searchParams):
     # get current config
     beamlineConfig = beamlineInfo(**searchParams)
-  
+
     # update with given param dict and last_modified
     paramDict['last_modified'] = time.time()
     beamlineConfig.update(paramDict)
-    
+
     # save  
     beamlineInfo(info_dict=beamlineConfig, **searchParams)
 
 def getBeamlineConfigParam(paramName, searchParams):
     beamlineConfig = beamlineInfo(**searchParams)
-    return beamlineConfig[paramName] 
+    return beamlineConfig[paramName]
 
 def getAllBeamlineConfigParams(searchParams):
     beamlineConfig = beamlineInfo(**searchParams)
     return beamlineConfig
-
-
-def userSettings(user_id, settings_name, settings_dict=None):
-    """
-    to write settings:  userSettings('matt', 'numbers', info_dict={'phone':'123','fax':'456'})
-    to fetch settings:  settings = userSettings('matt', 'numbers')
-    """
-
-    # if it exists it's a query or update
-    try:
-        uset = UserSettings.objects(__raw__={'user_id': user_id,
-                                             'settings_name': settings_name})[0]
-
-        if settings_dict is None:  # this is a query
-            return uset.settings
-
-        # else it's an update
-        uset.update(set__settings=settings_dict)
-
-    # else it's a create
-    except IndexError:
-        UserSettings(user_id=user_id, settings_name=settings_name, settings=settings_dict).save()
-
-
-def createField(name, description, bson_type, default_value=None,
-                validation_routine_name=None, **kwargs):
-    """
-    all params are strings except default_value, which might or might not be a string
-    depending on the type
-    """
-
-    f = Field(name=name, description=description, bson_type=bson_type,
-              default_value=default_value, validation_routine_name=validation_routine_name,
-              **kwargs)
-    f.save()
-
-
-def createType(name, desc, parent_type, field_list=None, **kwargs):
-    """
-    name must be a unique string
-    parent_type must be either, 'base', or an existing type_name
-    field_list is a list of Field objects.
-    """
-
-    t = Types(name=name, description=desc, parent_type=parent_type, **kwargs)
-    t.save()
-
 
